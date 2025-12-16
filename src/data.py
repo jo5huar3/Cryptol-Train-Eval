@@ -79,6 +79,13 @@ def _chunk_messages_by_tokens(
     current = []
 
     def tokens_for(msgs):
+        # normalize first (stringify, etc.)
+        msgs = _normalize_messages(msgs)
+
+        # IMPORTANT: never call chat_template on assistant-first sequences
+        if msgs and msgs[0]["role"] == "assistant":
+            msgs = [{"role": "user", "content": ""}] + msgs
+
         ids = tokenizer.apply_chat_template(
             msgs,
             tokenize=True,
@@ -86,6 +93,7 @@ def _chunk_messages_by_tokens(
             truncation=False,
         )
         return len(ids)
+
 
     def log_skip(n_tokens: int):
         msg = f"Skipping over-long single message with {n_tokens} tokens"
@@ -204,24 +212,59 @@ def explode_long_conversations(
     return Dataset.from_list(new_rows)
 
 def _normalize_messages(msgs: List[Dict[str, Any]]) -> List[Dict[str, str]]:
-    """Normalize content fields to plain strings; keep only role & content."""
-    out = []
-    for m in msgs:
-        role = m.get("role", "")
-        content = m.get("content", "")
+    """Normalize messages into strict chat-template friendly form."""
+    def to_text(content):
         if isinstance(content, list):
-            # flatten text parts if given like [{"type":"text","text":"..."}]
             parts = []
             for p in content:
                 if isinstance(p, dict) and p.get("type") == "text":
                     parts.append(p.get("text", ""))
                 elif isinstance(p, str):
                     parts.append(p)
-            content = "".join(parts)
-        elif not isinstance(content, str):
-            content = str(content)
-        out.append({"role": role, "content": content})
-    return out
+            return "".join(parts)
+        if isinstance(content, str):
+            return content
+        return "" if content is None else str(content)
+
+    sys_parts = []
+    seq = []
+
+    for m in msgs:
+        role = (m.get("role") or "").strip()
+        content = to_text(m.get("content", ""))
+
+        if not role:
+            continue
+
+        # If your data has tool/function roles, map or drop them.
+        if role in {"tool", "function", "observation"}:
+            role = "assistant"
+
+        if role == "system":
+            if content.strip():
+                sys_parts.append(content)
+            continue
+
+        if not content.strip():
+            continue
+
+        # merge consecutive same-role turns
+        if seq and seq[-1]["role"] == role:
+            seq[-1]["content"] += "\n\n" + content
+        else:
+            seq.append({"role": role, "content": content})
+
+    # drop leading assistants (template wants user first after optional system)
+    while seq and seq[0]["role"] == "assistant":
+        seq.pop(0)
+
+    # place system at top (single message)
+    if sys_parts:
+        sys_text = "\n\n".join(sys_parts)
+        seq = [{"role": "system", "content": sys_text}] + seq
+
+    return seq
+
 
 def load_or_make_dataset(jsonl_path: str):
     if jsonl_path:
