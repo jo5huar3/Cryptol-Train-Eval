@@ -79,11 +79,14 @@ def _chunk_messages_by_tokens(
     current = []
 
     def tokens_for(msgs):
-        # normalize first (stringify, etc.)
         msgs = _normalize_messages(msgs)
 
-        # IMPORTANT: never call chat_template on assistant-first sequences
-        if msgs and msgs[0]["role"] == "assistant":
+        # ✅ Guard: chat templates cannot run on an empty conversation
+        if not msgs:
+            return 0  # treat as empty → 0 tokens
+
+        # ✅ Guard: CodeLlama template doesn't allow assistant-first
+        if msgs[0]["role"] == "assistant":
             msgs = [{"role": "user", "content": ""}] + msgs
 
         ids = tokenizer.apply_chat_template(
@@ -93,6 +96,7 @@ def _chunk_messages_by_tokens(
             truncation=False,
         )
         return len(ids)
+
 
 
     def log_skip(n_tokens: int):
@@ -182,6 +186,10 @@ def explode_long_conversations(
 
         # normalize messages if you have this helper
         msgs_norm = _normalize_messages(msgs)
+        if not msgs_norm:
+            # skip bad row entirely
+            continue
+
 
         # use whatever your filename column is called; adjust if needed
         source_name = row.get("filename", f"row_{i}")
@@ -231,6 +239,9 @@ def _normalize_messages(msgs: List[Dict[str, Any]]) -> List[Dict[str, str]]:
 
     for m in msgs:
         role = (m.get("role") or "").strip()
+        if role not in {"system", "user", "assistant"}:
+            continue
+
         content = to_text(m.get("content", ""))
 
         if not role:
